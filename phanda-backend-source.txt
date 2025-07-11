@@ -1,0 +1,390 @@
+
+
+=== server.js ===
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+require('dotenv').config();
+
+const authRoutes = require('./routes/auth');
+const productRoutes = require('./routes/products');
+const transactionRoutes = require('./routes/transactions');
+const adminRoutes = require('./routes/admin');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(() => console.log('MongoDB connected'))
+  .catch(err => console.log(err));
+
+app.use('/api/auth', authRoutes);
+app.use('/api/products', productRoutes);
+app.use('/api/transactions', transactionRoutes);
+app.use('/api/admin', adminRoutes);
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+
+
+=== package.json ===
+{
+  "name": "phanda-backend",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.3",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.0",
+    "mongoose": "^7.0.3"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.22"
+  }
+}
+
+
+
+=== seed.js ===
+const mongoose = require('mongoose');
+const User = require('./models/User');
+const Product = require('./models/Product');
+const Transaction = require('./models/Transaction');
+const bcrypt = require('bcryptjs');
+require('dotenv').config();
+
+async function seed() {
+  await mongoose.connect(process.env.MONGO_URI);
+  await User.deleteMany({});
+  await Product.deleteMany({});
+  await Transaction.deleteMany({});
+
+  const hashedPassword = await bcrypt.hash('testpass', 10);
+
+  const buyer = await User.create({
+    role: 'buyer',
+    username: 'buyer001',
+    fullName: 'Jane Doe',
+    email: 'buyer@example.com',
+    password: hashedPassword
+  });
+
+  const supplier1 = await User.create({
+    role: 'supplier',
+    username: 'supplier001',
+    fullName: 'John Supplier',
+    email: 'supplier1@example.com',
+    password: hashedPassword,
+    businessName: 'Eco Tools Inc.',
+    businessAddress: '123 Green St',
+    verified: true
+  });
+
+  const supplier2 = await User.create({
+    role: 'supplier',
+    username: 'supplier002',
+    fullName: 'Sally Maker',
+    email: 'supplier2@example.com',
+    password: hashedPassword,
+    businessName: 'Clean Products Co.',
+    businessAddress: '456 Blue Ave',
+    verified: true
+  });
+
+  const product1 = await Product.create({
+    supplierId: supplier1._id,
+    name: 'Eco Shovel',
+    description: 'Biodegradable garden shovel',
+    images: ['https://via.placeholder.com/150'],
+    sector: 'Gardening',
+    country: 'USA',
+    eta: '3-5 days',
+    deliveryMethod: 'Courier',
+    thirdPartyPartner: 'DHL',
+    price: 25
+  });
+
+  const product2 = await Product.create({
+    supplierId: supplier2._id,
+    name: 'Reusable Bottle',
+    description: 'Steel bottle for drinks',
+    images: ['https://via.placeholder.com/150'],
+    sector: 'Home & Living',
+    country: 'Canada',
+    eta: '4-6 days',
+    deliveryMethod: 'Freight',
+    thirdPartyPartner: 'FedEx',
+    price: 18
+  });
+
+  await Transaction.create([
+    {
+      buyerId: buyer._id,
+      products: [{ productId: product1._id, quantity: 2 }],
+      totalAmount: 50,
+      status: 'success',
+      suppliersInvolved: [supplier1._id]
+    },
+    {
+      buyerId: buyer._id,
+      products: [{ productId: product2._id, quantity: 1 }],
+      totalAmount: 18,
+      status: 'failed',
+      suppliersInvolved: [supplier2._id]
+    }
+  ]);
+
+  console.log('✅ Sample data seeded');
+  mongoose.connection.close();
+}
+
+seed();
+
+
+
+=== emailReport.js ===
+const nodemailer = require("nodemailer");
+const mongoose = require("mongoose");
+const Transaction = require("./models/Transaction");
+require("dotenv").config();
+
+const sendEmailReport = async () => {
+  await mongoose.connect(process.env.MONGO_URI);
+  const now = new Date();
+  const getRange = (days) => new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+
+  const transactions = await Transaction.find();
+  const daily = transactions.filter(txn => new Date(txn.createdAt) >= getRange(1));
+  const weekly = transactions.filter(txn => new Date(txn.createdAt) >= getRange(7));
+  const monthly = transactions.filter(txn => new Date(txn.createdAt) >= getRange(30));
+  const failed = transactions.filter(txn => txn.status === "failed");
+
+  const content = `
+    Daily Sales: ${daily.length}
+    Weekly Sales: ${weekly.length}
+    Monthly Sales: ${monthly.length}
+    Total Transactions: ${transactions.length}
+    Failed Transactions: ${failed.length}
+    Failed Rate: ${(failed.length / transactions.length * 100).toFixed(2)}%
+  `;
+
+  const transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: process.env.EMAIL_SENDER,
+      pass: process.env.EMAIL_PASSWORD
+    }
+  });
+
+  await transporter.sendMail({
+    from: process.env.EMAIL_SENDER,
+    to: "mofokengn47@gmail.com",
+    subject: "Phanda Daily Sales Report",
+    text: content
+  });
+
+  console.log("📧 Daily report sent.");
+  mongoose.connection.close();
+};
+
+sendEmailReport();
+
+
+
+=== routes/auth.js ===
+const express = require("express");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const User = require("../models/User");
+
+const router = express.Router();
+
+router.post("/register", async (req, res) => {
+  const { role, username, email, password, fullName, businessName, businessAddress } = req.body;
+  const hashedPassword = await bcrypt.hash(password, 10);
+  const user = new User({ role, username, email, password: hashedPassword, fullName, businessName, businessAddress });
+  await user.save();
+  res.status(201).json({ message: "User registered" });
+});
+
+router.post("/login", async (req, res) => {
+  const { email, password } = req.body;
+  const user = await User.findOne({ email });
+  if (!user || !(await bcrypt.compare(password, user.password))) return res.status(401).json({ message: "Invalid" });
+  const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET);
+  res.json({ token, role: user.role });
+});
+
+module.exports = router;
+
+
+
+=== routes/products.js ===
+const express = require("express");
+const Product = require("../models/Product");
+const { verifyToken, verifySupplier } = require("../middleware/auth");
+
+const router = express.Router();
+
+router.post("/", verifyToken, verifySupplier, async (req, res) => {
+  const newProduct = new Product({ ...req.body, supplierId: req.user.id });
+  await newProduct.save();
+  res.status(201).json(newProduct);
+});
+
+router.get("/", async (req, res) => {
+  const products = await Product.find().populate("supplierId", "username");
+  res.json(products);
+});
+
+module.exports = router;
+
+
+
+=== routes/transactions.js ===
+const express = require("express");
+const Transaction = require("../models/Transaction");
+const { verifyToken } = require("../middleware/auth");
+
+const router = express.Router();
+
+router.post("/", verifyToken, async (req, res) => {
+  const { products, totalAmount, suppliersInvolved } = req.body;
+  const txn = new Transaction({ buyerId: req.user.id, products, totalAmount, suppliersInvolved });
+  await txn.save();
+  res.status(201).json(txn);
+});
+
+router.get("/", verifyToken, async (req, res) => {
+  const txns = await Transaction.find({}).populate("buyerId").populate("products.productId");
+  res.json(txns);
+});
+
+module.exports = router;
+
+
+
+=== routes/admin.js ===
+const express = require("express");
+const Transaction = require("../models/Transaction");
+const { verifyToken, verifyAdmin } = require("../middleware/auth");
+
+const router = express.Router();
+
+// Sales Reports
+router.get("/reports", verifyToken, verifyAdmin, async (req, res) => {
+  const transactions = await Transaction.find();
+  const now = new Date();
+  const getRange = (days) => new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+
+  const daily = transactions.filter(txn => new Date(txn.createdAt) >= getRange(1));
+  const weekly = transactions.filter(txn => new Date(txn.createdAt) >= getRange(7));
+  const monthly = transactions.filter(txn => new Date(txn.createdAt) >= getRange(30));
+
+  const failedCount = transactions.filter(txn => txn.status === "failed").length;
+  const failRate = (failedCount / transactions.length) * 100;
+
+  res.json({
+    total: transactions.length,
+    failRate: `${failRate.toFixed(2)}%`,
+    report: {
+      daily: daily.length,
+      weekly: weekly.length,
+      monthly: monthly.length
+    }
+  });
+});
+
+module.exports = router;
+
+
+
+=== models/User.js ===
+const mongoose = require("mongoose");
+
+const userSchema = new mongoose.Schema({
+  role: { type: String, enum: ["buyer", "supplier", "admin"], required: true },
+  username: { type: String, required: true, unique: true },
+  fullName: String,
+  email: { type: String, required: true, unique: true },
+  password: String,
+  businessName: String,
+  businessAddress: String,
+  verified: { type: Boolean, default: false },
+}, { timestamps: true });
+
+module.exports = mongoose.model("User", userSchema);
+
+
+
+=== models/Product.js ===
+const mongoose = require("mongoose");
+
+const productSchema = new mongoose.Schema({
+  supplierId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  name: String,
+  description: String,
+  images: [String],
+  sector: String,
+  country: String,
+  eta: String,
+  deliveryMethod: String,
+  thirdPartyPartner: String,
+  price: Number,
+}, { timestamps: true });
+
+module.exports = mongoose.model("Product", productSchema);
+
+
+
+=== models/Transaction.js ===
+const mongoose = require("mongoose");
+
+const transactionSchema = new mongoose.Schema({
+  buyerId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  products: [{
+    productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product" },
+    quantity: Number
+  }],
+  totalAmount: Number,
+  status: { type: String, enum: ["success", "failed"], default: "success" },
+  suppliersInvolved: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }]
+}, { timestamps: true });
+
+module.exports = mongoose.model("Transaction", transactionSchema);
+
+
+
+=== middleware/auth.js ===
+const jwt = require("jsonwebtoken");
+
+function verifyToken(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.sendStatus(403);
+  const token = authHeader.split(" ")[1];
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) return res.sendStatus(403);
+    req.user = user;
+    next();
+  });
+}
+
+function verifySupplier(req, res, next) {
+  if (req.user.role !== "supplier") return res.sendStatus(403);
+  next();
+}
+
+function verifyAdmin(req, res, next) {
+  if (req.user.role !== "admin") return res.sendStatus(403);
+  next();
+}
+
+module.exports = { verifyToken, verifySupplier, verifyAdmin };
